@@ -1,26 +1,75 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LPTech Trace Visualizer</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; background: #fafafa; }
-    h1 { margin: 0 0 8px; }
-    #meta { margin: 0 0 12px; font-size: 14px; color: #555; }
-    canvas { border: 1px solid #ddd; width: 100%; max-width: 900px; height: 400px; background: #fff; display: block; }
-    button { margin-top: 10px; padding: 6px 10px; }
+    :root {
+      --bg: #0b0b0b;
+      --grid: #2a2a2a;
+      --grid-major: #3a3a3a;
+      --trace: #ffd000;
+      /* yellow */
+      --text: #e5e5e5;
+      --accent: #1aff00;
+      /* green text like reference */
+    }
+
+    body {
+      font-family: Arial, sans-serif;
+      margin: 24px;
+      background: #efefef;
+      color: var(--text);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      color: #111;
+    }
+
+    #meta {
+      margin: 0 0 12px;
+      font-size: 14px;
+      color: #444;
+    }
+
+    .frame {
+      width: 100%;
+      max-width: 1000px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 420px;
+      display: block;
+      background: var(--bg);
+      border: 1px solid #cfcfcf;
+    }
+
+    button {
+      margin-top: 10px;
+      padding: 6px 10px;
+    }
   </style>
 </head>
+
 <body>
   <h1>LPTech Trace Visualizer</h1>
   <div id="meta">Loading traces…</div>
-  <canvas id="chart" width="900" height="400"></canvas>
+ <canvas id="chart" width="1000" height="420"></canvas>
   <button id="toggleBtn">Pause</button>
 
   <script>
+    // Fixed axes to mimic the sample image
+    const FREQ_MIN = 850;   // MHz
+    const FREQ_MAX = 1150;  // MHz
+    const DBM_MIN = -130;  // dBm (bottom)
+    const DBM_MAX = -30;  // dBm (top)
+
     const canvas = document.getElementById('chart');
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false });
     const meta = document.getElementById('meta');
     const btn = document.getElementById('toggleBtn');
 
@@ -29,57 +78,117 @@
     let timer = null;
     let playing = true;
 
-    async function load() {
-      try {
-        const res = await fetch('/api/traces');
-        const data = await res.json();
-        traces = data.traces || [];
-        console.log('Traces loaded:', traces.length);
-        console.log('First trace sample:', traces[0]);
-        meta.textContent = `Loaded ${traces.length} traces.`;
-        if (!traces.length) return;
-        play();
-      } catch (e) {
-        console.error('Load error:', e);
-        meta.textContent = 'Load error: ' + e;
-      }
+    // Helpers: scales
+    function xPixFromIndex(i, n, left, plotW) {
+      return left + (i / (n - 1)) * plotW;
     }
-
-    function draw(values, label) {
-      const w = canvas.width, h = canvas.height;
-      ctx.fillStyle = '#fff';
+    function yPixFromDbm(v, top, plotH) {
+      const clamped = Math.max(DBM_MIN, Math.min(DBM_MAX, v));
+      const t = (clamped - DBM_MIN) / (DBM_MAX - DBM_MIN); // 0..1
+      return top + (1 - t) * plotH;
+    }
+    function drawGrid(w, h, left, top, plotW, plotH) {
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg');
       ctx.fillRect(0, 0, w, h);
 
+      // Grid lines
+      ctx.lineWidth = 1;
+
+      // vertical major at every 50 MHz, minor at every 10 MHz
+      const majorX = 50, minorX = 10;
+      for (let f = FREQ_MIN; f <= FREQ_MAX + 0.0001; f += minorX) {
+        const i = (f - FREQ_MIN) / (FREQ_MAX - FREQ_MIN); // 0..1
+        const x = left + i * plotW;
+        ctx.strokeStyle = (f % majorX === 0) ? getCSS('--grid-major') : getCSS('--grid');
+        ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + plotH); ctx.stroke();
+      }
+
+      // horizontal major every 20 dB, minor every 10 dB
+      const majorY = 20, minorY = 10;
+      for (let d = DBM_MIN; d <= DBM_MAX + 0.0001; d += minorY) {
+        const t = (d - DBM_MIN) / (DBM_MAX - DBM_MIN);
+        const y = top + (1 - t) * plotH;
+        ctx.strokeStyle = ((d - DBM_MIN) % majorY === 0) ? getCSS('--grid-major') : getCSS('--grid');
+        ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(left + plotW, y); ctx.stroke();
+      }
+
+      // axis labels
+      ctx.fillStyle = getCSS('--text');
+      ctx.font = '12px Arial';
+
+      // Y labels (every 20 dB)
+      for (let d = DBM_MIN; d <= DBM_MAX; d += majorY) {
+        const y = yPixFromDbm(d, top, plotH);
+        ctx.fillText(`${d} dBm`, 6, Math.round(y) - 2);
+      }
+
+      // X labels: 850, 1000, 1150
+      ctx.textAlign = 'center';
+      ctx.fillText(`${FREQ_MIN} MHz`, left, top + plotH + 16);
+      ctx.fillText(`1000 MHz`, left + plotW / 2, top + plotH + 16);
+      ctx.fillText(`${FREQ_MAX} MHz`, left + plotW, top + plotH + 16);
+      ctx.textAlign = 'left';
+    }
+
+    function getCSS(varName) {
+      return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+    }
+
+    function drawTrace(values, trace) {
+      const w = canvas.width, h = canvas.height;
+      const left = 56, top = 10, plotW = w - left - 16, plotH = h - top - 36;
+
+      drawGrid(w, h, left, top, plotW, plotH);
+
       if (!values || values.length < 2) {
-        ctx.fillStyle = '#c00';
-        ctx.fillText('No values to draw', 10, 20);
+        ctx.fillStyle = '#f00';
+        ctx.fillText('No values to draw', left + 10, top + 20);
         return;
       }
 
-      let min = Infinity, max = -Infinity;
-      for (const v of values) { if (v < min) min = v; if (v > max) max = v; }
-      const span = (max - min) || 1; // avoid divide by zero
-
-      ctx.strokeStyle = '#007acc';
+      // draw polyline in yellow
+      ctx.strokeStyle = getCSS('--trace');
+      ctx.lineWidth = 1.2;
       ctx.beginPath();
       for (let i = 0; i < values.length; i++) {
-        const x = (i / (values.length - 1)) * w;
-        const y = h - ((values[i] - min) / span) * h;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        const x = xPixFromIndex(i, values.length, left, plotW);
+        const y = yPixFromDbm(values[i], top, plotH);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       }
       ctx.stroke();
 
-      ctx.fillStyle = '#333';
-      ctx.font = '14px Arial, sans-serif';
-      ctx.fillText(label, 10, 20);
+      // green annotations like the sample
+      ctx.fillStyle = getCSS('--accent');
+      ctx.font = '12px Arial';
+      ctx.fillText('New BW Segment', left + 10, top + 16);
+      // top-right small number (use max value index as a placeholder)
+      const max = Math.max(...values);
+      ctx.textAlign = 'right';
+      ctx.fillText(`${Math.round((max + 0) * 10)}`, left + plotW - 6, top + 16);
+      ctx.textAlign = 'left';
+
+      // bottom center "Trace Time ..."
+      ctx.textAlign = 'center';
+      const t = new Date(trace.trace_time);
+      ctx.fillText(`Trace Time: ${t.toLocaleString()}`, left + plotW / 2, top + plotH + 32);
+      ctx.textAlign = 'left';
+    }
+
+    async function load() {
+      const res = await fetch('/api/traces');
+      const data = await res.json();
+      traces = (data.traces || []).map(t => ({
+        ...t,
+        values: (t.values || []).map(Number).filter(Number.isFinite)
+      }));
+      meta.textContent = `Loaded ${traces.length} traces.`;
+
+      if (traces.length) play();
     }
 
     function step() {
       const t = traces[idx];
-      if (!t) return;
-      const vals = (t.values || []).map(Number).filter(Number.isFinite);
-      const label = `Trace #${t.trace_id} • ${new Date(t.trace_time).toLocaleString()}`;
-      draw(vals, label);
+      drawTrace(t.values, t);
       idx = (idx + 1) % traces.length;
     }
 
@@ -87,18 +196,18 @@
       playing = true;
       btn.textContent = 'Pause';
       step();
-      timer = setInterval(step, 1000); // 1s per spec
+      timer = setInterval(step, 1000);
     }
-
     function pause() {
       playing = false;
       btn.textContent = 'Play';
-      if (timer) clearInterval(timer);
-      timer = null;
+      clearInterval(timer);
     }
-
     btn.addEventListener('click', () => (playing ? pause() : play()));
+
     load();
   </script>
+
 </body>
+
 </html>
