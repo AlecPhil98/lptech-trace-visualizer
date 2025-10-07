@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>LPTech Trace Visualizer</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #fafafa; }
+    h1 { margin: 0 0 8px; }
+    #meta { margin: 0 0 12px; font-size: 14px; color: #555; }
+    canvas { border: 1px solid #ddd; width: 100%; max-width: 900px; height: 400px; background: #fff; display: block; }
+    button { margin-top: 10px; padding: 6px 10px; }
+  </style>
+</head>
+<body>
+  <h1>LPTech Trace Visualizer</h1>
+  <div id="meta">Loading traces…</div>
+  <canvas id="chart" width="900" height="400"></canvas>
+  <button id="toggleBtn">Pause</button>
+
+  <script>
+    const canvas = document.getElementById('chart');
+    const ctx = canvas.getContext('2d');
+    const meta = document.getElementById('meta');
+    const btn = document.getElementById('toggleBtn');
+
+    let traces = [];
+    let idx = 0;
+    let timer = null;
+    let playing = true;
+
+    async function load() {
+      try {
+        const res = await fetch('/api/traces');
+        const data = await res.json();
+        traces = data.traces || [];
+        console.log('Traces loaded:', traces.length);
+        console.log('First trace sample:', traces[0]);
+        meta.textContent = `Loaded ${traces.length} traces.`;
+        if (!traces.length) return;
+        play();
+      } catch (e) {
+        console.error('Load error:', e);
+        meta.textContent = 'Load error: ' + e;
+      }
+    }
+
+    function draw(values, label) {
+      const w = canvas.width, h = canvas.height;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, w, h);
+
+      if (!values || values.length < 2) {
+        ctx.fillStyle = '#c00';
+        ctx.fillText('No values to draw', 10, 20);
+        return;
+      }
+
+      let min = Infinity, max = -Infinity;
+      for (const v of values) { if (v < min) min = v; if (v > max) max = v; }
+      const span = (max - min) || 1; // avoid divide by zero
+
+      ctx.strokeStyle = '#007acc';
+      ctx.beginPath();
+      for (let i = 0; i < values.length; i++) {
+        const x = (i / (values.length - 1)) * w;
+        const y = h - ((values[i] - min) / span) * h;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      ctx.fillStyle = '#333';
+      ctx.font = '14px Arial, sans-serif';
+      ctx.fillText(label, 10, 20);
+    }
+
+    function step() {
+      const t = traces[idx];
+      if (!t) return;
+      const vals = (t.values || []).map(Number).filter(Number.isFinite);
+      const label = `Trace #${t.trace_id} • ${new Date(t.trace_time).toLocaleString()}`;
+      draw(vals, label);
+      idx = (idx + 1) % traces.length;
+    }
+
+    function play() {
+      playing = true;
+      btn.textContent = 'Pause';
+      step();
+      timer = setInterval(step, 1000); // 1s per spec
+    }
+
+    function pause() {
+      playing = false;
+      btn.textContent = 'Play';
+      if (timer) clearInterval(timer);
+      timer = null;
+    }
+
+    btn.addEventListener('click', () => (playing ? pause() : play()));
+    load();
+  </script>
+</body>
+</html>
